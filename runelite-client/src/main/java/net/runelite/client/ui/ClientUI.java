@@ -163,8 +163,9 @@ public class ClientUI
 	private boolean withTitleBar;
 
 	private ContainableFrame frame;
-	private JPanel content;
+	private ContentPane content;
 	private ClientPanel clientPanel;
+	private boolean sidebarOverlay;
 	private JButton sidebarNavBtn;
 	private Dimension lastClientSize;
 	private Cursor defaultCursor;
@@ -400,7 +401,7 @@ public class ClientUI
 				}
 			});
 
-			content = new JPanel();
+			content = new ContentPane();
 			content.setLayout(new Layout());
 
 			clientPanel = new ClientPanel(this.client);
@@ -485,6 +486,12 @@ public class ClientUI
 			});
 
 			content.add(sidebar);
+			// The sidebar is drawn on top of the game when the overlay side panel option is
+			// enabled. Components with a lower z order index are painted last, and so appear
+			// above their siblings.
+			content.setComponentZOrder(sidebar, 0);
+			sidebarOverlay = config.sidebarOverlayMode();
+			content.setOverlapping(sidebarOverlay);
 
 			frame.setContentPane(content);
 
@@ -1239,7 +1246,39 @@ public class ClientUI
 			configManager.unsetConfiguration(CONFIG_GROUP, CONFIG_CLIENT_BOUNDS);
 		}
 
+		applySidebarOverlay(config.sidebarOverlayMode());
+
 		applyGameSize(false);
+	}
+
+	/**
+	 * Switch between the side panel being laid out next to the game and being drawn on top of it.
+	 * <p>
+	 * The game keeps the size it had before the switch: when the panel starts overlaying the game
+	 * the game grows into the space the panel used to occupy, and when it stops the game gives that
+	 * space back. Either way the window itself keeps its size.
+	 */
+	private void applySidebarOverlay(boolean overlay)
+	{
+		if (overlay == sidebarOverlay || content == null || sidebar == null || clientPanel == null)
+		{
+			return;
+		}
+
+		sidebarOverlay = overlay;
+		content.setOverlapping(overlay);
+
+		if (sidebar.isVisible())
+		{
+			int sidebarWidth = sidebar.getPreferredSize().width;
+			clientPanel.setSize(
+				clientPanel.getWidth() + (overlay ? sidebarWidth : -sidebarWidth),
+				clientPanel.getHeight());
+		}
+
+		content.revalidate();
+		content.repaint();
+		giveClientFocus();
 	}
 
 	private void applyGameSize(boolean force)
@@ -1430,6 +1469,27 @@ public class ClientUI
 		return trayIcon;
 	}
 
+	/**
+	 * The frame's content pane. Swing only supports children of a container overlapping each other
+	 * if the container reports that it can't optimize its drawing, so this has to be toggled along
+	 * with the overlay side panel option.
+	 */
+	private static class ContentPane extends JPanel
+	{
+		private boolean overlapping;
+
+		void setOverlapping(boolean overlapping)
+		{
+			this.overlapping = overlapping;
+		}
+
+		@Override
+		public boolean isOptimizedDrawingEnabled()
+		{
+			return !overlapping;
+		}
+	}
+
 	private class Layout implements LayoutManager2
 	{
 		private int prevState;
@@ -1467,7 +1527,7 @@ public class ClientUI
 			{
 				return size(content, c ->
 				{
-					if (c == content.getComponent(1))
+					if (c == sidebar)
 					{
 						// the sidebar always is given it's pref width exactly
 						return new Dimension(c.getPreferredSize().width, c.getMinimumSize().height);
@@ -1480,7 +1540,7 @@ public class ClientUI
 
 		void forceClientSize(int width, int height)
 		{
-			Component client = content.getComponent(0);
+			Component client = clientPanel;
 			client.setSize(width, height);
 			// must adjust content height since the client height is derived from the content height
 			Insets insets = content.getInsets();
@@ -1503,8 +1563,9 @@ public class ClientUI
 			int insetWidth = insets.left + insets.right;
 			int insetHeight = insets.top + insets.bottom;
 
-			Component client = content.getComponent(0);
-			Component sidebar = content.getComponent(1);
+			Component client = clientPanel;
+			Component sidebar = ClientUI.this.sidebar;
+			final boolean overlay = sidebarOverlay;
 
 			log.trace("starting layout  - content={} client={} sidebar={} frame={} prevContent={}", content.getWidth(), client.getWidth(), sidebar.getWidth(), frame.getWidth(), previousContentWidth);
 
@@ -1529,6 +1590,9 @@ public class ClientUI
 			int sidebarWidth = sidebar.isVisible()
 				? sidebar.getPreferredSize().width
 				: 0;
+			// the width the sidebar takes away from the game. An overlaid sidebar is drawn on top
+			// of the game instead of beside it, so it doesn't take any width away from it.
+			int reservedWidth = overlay ? 0 : sidebarWidth;
 
 			boolean keepGameSize = (frame.getExtendedState() & Frame.MAXIMIZED_HORIZ) == 0
 				&& (config.automaticResizeType() == ExpandResizeType.KEEP_GAME_SIZE || forceSizingClient);
@@ -1541,18 +1605,28 @@ public class ClientUI
 			else
 			{
 				// fit client to window
-				clientWidth = Math.max(clientMinWidth, contentWidth - sidebarWidth);
+				clientWidth = Math.max(clientMinWidth, contentWidth - reservedWidth);
 			}
 
 			// fit window to client
-			int width = clientWidth + sidebarWidth;
+			int width = clientWidth + reservedWidth;
 
 			content.setSize(width + insetWidth, innerHeight + insetHeight);
 			content.setPreferredSize(content.getSize());
 			previousContentWidth = width;
 
 			client.setBounds(insets.left, insets.top, clientWidth, innerHeight);
-			sidebar.setBounds(insets.left + clientWidth, insets.top, sidebarWidth, innerHeight);
+			if (overlay)
+			{
+				// right align the sidebar over the game, clamping it to the game's width so it
+				// can't be pushed off screen
+				int overlayWidth = Math.min(sidebarWidth, clientWidth);
+				sidebar.setBounds(insets.left + clientWidth - overlayWidth, insets.top, overlayWidth, innerHeight);
+			}
+			else
+			{
+				sidebar.setBounds(insets.left + clientWidth, insets.top, sidebarWidth, innerHeight);
+			}
 
 			Rectangle oldBounds = frame.getBounds();
 			frame.revalidateMinimumSize();
@@ -1582,17 +1656,25 @@ public class ClientUI
 
 		private Dimension size(Container content, Function<Component, Dimension> sizer)
 		{
-			Dimension out = new Dimension(0, 0);
-			for (int i = 0; i < content.getComponentCount(); i++)
+			if (clientPanel == null || ClientUI.this.sidebar == null)
 			{
-				Component child = content.getComponent(i);
-				if (child.isVisible())
-				{
-					Dimension dim = sizer.apply(child);
-					out.width += dim.width;
-					out.height = Math.max(out.height, dim.height);
-				}
+				Insets is = content.getInsets();
+				return new Dimension(is.left + is.right, is.top + is.bottom);
 			}
+
+			Dimension client = clientPanel.isVisible()
+				? sizer.apply(clientPanel)
+				: new Dimension(0, 0);
+			Dimension sidebar = ClientUI.this.sidebar.isVisible()
+				? sizer.apply(ClientUI.this.sidebar)
+				: new Dimension(0, 0);
+
+			Dimension out = new Dimension(0, 0);
+			// an overlaid sidebar shares the game's width instead of adding to it
+			out.width = sidebarOverlay
+				? Math.max(client.width, sidebar.width)
+				: client.width + sidebar.width;
+			out.height = Math.max(client.height, sidebar.height);
 
 			Insets is = content.getInsets();
 			out.width += is.left + is.right;
