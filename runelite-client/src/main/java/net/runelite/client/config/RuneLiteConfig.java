@@ -84,6 +84,18 @@ public interface RuneLiteConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "sidebarOverlayMode",
+		name = "Overlay side panel",
+		description = "Draw the side panel on top of the game instead of resizing the game or the window when it is opened.",
+		position = 11,
+		section = windowSettings
+	)
+	default boolean sidebarOverlayMode()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "lockWindowSize",
 		name = "Lock window size",
 		description = "Determines if the window resizing is allowed or not.",
