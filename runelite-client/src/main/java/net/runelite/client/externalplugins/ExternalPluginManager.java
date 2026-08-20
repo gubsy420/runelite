@@ -36,11 +36,13 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +51,8 @@ import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -63,6 +67,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ExternalPluginsChanged;
 import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.ui.SplashScreen;
@@ -116,14 +121,115 @@ public class ExternalPluginManager
 			new Random().nextInt(60), 180, TimeUnit.MINUTES);
 	}
 
+	/** Plugin classes found in the sideload directory, and their names for hub conflict resolution. */
+	private final List<Class<?>> sideloadedPlugins = new ArrayList<>();
+	private final Set<String> sideloadedClassNames = new HashSet<>();
+
 	public void loadExternalPlugins() throws PluginInstantiationException
 	{
+		// Discovered before refreshPlugins() so the hub knows to stand aside for anything sideloaded
+		// - see refreshPlugins()'s builtinExternalClasses.
+		discoverSideloadedPlugins();
+
 		refreshPlugins();
 
 		if (builtinExternals != null)
 		{
 			// builtin external's don't actually have a manifest or a separate classloader...
 			pluginManager.loadPlugins(Lists.newArrayList(builtinExternals), null);
+		}
+
+		if (!sideloadedPlugins.isEmpty())
+		{
+			// Started later by PluginManager.startPlugins(), same as everything else loaded here.
+			pluginManager.loadPlugins(sideloadedPlugins, null);
+		}
+	}
+
+	/**
+	 * Loads locally built plugin jars out of {@link RuneLite#SIDELOADED_PLUGINS_DIR}, bypassing the
+	 * plugin hub's manifest and hash verification entirely.
+	 * <p>
+	 * This exists for working on a hub plugin's source. The hub owns everything in
+	 * {@link RuneLite#PLUGINS_DIR} and deletes any jar there it doesn't recognise, and
+	 * {@link #loadBuiltin} needs assertions enabled and the class already on the classpath, so
+	 * neither is a way to run a modified build of a plugin in an ordinary client. A jar dropped in
+	 * the sideload directory is loaded as-is instead.
+	 * <p>
+	 * Anything found here takes precedence over the hub's copy of the same plugin class, so a
+	 * modified build replaces the installed one without having to uninstall it first.
+	 */
+	private void discoverSideloadedPlugins()
+	{
+		sideloadedPlugins.clear();
+		sideloadedClassNames.clear();
+
+		if (safeMode)
+		{
+			return;
+		}
+
+		File[] jars = RuneLite.SIDELOADED_PLUGINS_DIR.listFiles((dir, name) -> name.endsWith(".jar"));
+		if (jars == null || jars.length == 0)
+		{
+			return;
+		}
+
+		for (File jar : jars)
+		{
+			try
+			{
+				URLClassLoader cl = new URLClassLoader(new URL[]{jar.toURI().toURL()},
+					ExternalPluginManager.class.getClassLoader());
+
+				List<Class<?>> found = new ArrayList<>();
+				try (JarFile jarFile = new JarFile(jar))
+				{
+					for (Enumeration<JarEntry> it = jarFile.entries(); it.hasMoreElements(); )
+					{
+						String name = it.nextElement().getName();
+						if (!name.endsWith(".class") || name.contains("$"))
+						{
+							continue;
+						}
+
+						String className = name.substring(0, name.length() - ".class".length())
+							.replace('/', '.');
+						try
+						{
+							Class<?> clazz = cl.loadClass(className);
+							if (Plugin.class.isAssignableFrom(clazz)
+								&& clazz.getAnnotation(PluginDescriptor.class) != null)
+							{
+								found.add(clazz);
+							}
+						}
+						catch (Throwable e)
+						{
+							// A jar can carry classes that don't resolve against this client build;
+							// only the ones that do and are plugins matter here.
+							log.debug("Unable to inspect \"{}\" in sideloaded plugin \"{}\"", className, jar.getName(), e);
+						}
+					}
+				}
+
+				if (found.isEmpty())
+				{
+					log.warn("Sideloaded jar \"{}\" contains no plugins", jar.getName());
+					continue;
+				}
+
+				for (Class<?> clazz : found)
+				{
+					log.info("Loading sideloaded plugin \"{}\" from \"{}\"", clazz.getName(), jar.getName());
+					sideloadedClassNames.add(clazz.getName());
+				}
+				sideloadedPlugins.addAll(found);
+			}
+			catch (IOException e)
+			{
+				log.warn("Unable to load sideloaded plugin \"{}\"", jar.getName(), e);
+			}
 		}
 	}
 
@@ -141,7 +247,9 @@ public class ExternalPluginManager
 			return;
 		}
 
-		Set<String> builtinExternalClasses = new HashSet<>();
+		// Seeded with the sideloaded classes so a locally built copy of a hub plugin wins over the
+		// installed one, using the same skip the builtin externals already rely on.
+		Set<String> builtinExternalClasses = new HashSet<>(sideloadedClassNames);
 		if (builtinExternals != null)
 		{
 			for (Class<? extends Plugin> pluginClass : builtinExternals)

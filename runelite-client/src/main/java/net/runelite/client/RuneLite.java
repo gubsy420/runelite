@@ -101,6 +101,8 @@ public class RuneLite
 	public static final File RUNELITE_DIR = new File(System.getProperty("user.home"), ".runelite");
 	public static final File CACHE_DIR = new File(RUNELITE_DIR, "cache");
 	public static final File PLUGINS_DIR = new File(RUNELITE_DIR, "plugins");
+	/** Locally built plugin jars, loaded as-is and taking precedence over the hub's copies. See ExternalPluginManager. */
+	public static final File SIDELOADED_PLUGINS_DIR = new File(RUNELITE_DIR, "sideloaded-plugins");
 	public static final File SCREENSHOT_DIR = new File(RUNELITE_DIR, "screenshots");
 	public static final File LOGS_DIR = new File(RUNELITE_DIR, "logs");
 	public static final File DEFAULT_SESSION_FILE = new File(RUNELITE_DIR, "session");
