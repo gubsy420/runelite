@@ -140,6 +140,10 @@ public class ClientUI
 	private static final String CONFIG_CLIENT_MAXIMIZED = "clientMaximized";
 	private static final String CONFIG_CLIENT_SIDEBAR_CLOSED = "clientSidebarClosed";
 	private static final String CONFIG_CLIENT_SIDEBAR_ORDER = "clientSidebarOrder";
+	/** Size the RuneScape pixel font is drawn for. Enlarging past it resamples glyphs and looks blurry. */
+	private static final int RUNESCAPE_FONT_DESIGN_SIZE = 16;
+	/** Padding inside each icon-strip button. Fixed, so button growth goes into the icon. */
+	private static final int TAB_INSET = 4;
 	public static final BufferedImage ICON_128 = ImageUtil.loadImageResource(ClientUI.class, "runelite_128.png");
 	public static final BufferedImage ICON_16 = ImageUtil.loadImageResource(ClientUI.class, "runelite_16.png");
 
@@ -193,6 +197,7 @@ public class ClientUI
 	private boolean autoHideSuppressHistory;
 	private NavigationButton autoHideLastTab;
 	private long autoHideLeftAt;
+	private boolean sidebarPinned;
 	private Dimension lastClientSize;
 	private Cursor defaultCursor;
 
@@ -269,8 +274,7 @@ public class ClientUI
 			return;
 		}
 
-		final int TAB_SIZE = 16;
-		Icon icon = new ImageIcon(ImageUtil.resizeImage(navBtn.getIcon(), TAB_SIZE, TAB_SIZE));
+		Icon icon = sidebarTabIcon(navBtn);
 
 		sidebar.insertTab(null, icon, navBtn.getPanel().getWrappedPanel(), navBtn.getTooltip(),
 			sidebarEntries.headSet(navBtn).size());
@@ -552,15 +556,33 @@ public class ClientUI
 							Rectangle bounds = sidebar.getBoundsAt(index++);
 							if (bounds != null && bounds.contains(e.getX(), e.getY()))
 							{
+								var menu = new JPopupMenu();
+
+								// Pinning is a property of the strip rather than of any one plugin,
+								// so it heads every button's menu while auto-hide is running.
+								if (autoHideTimer != null)
+								{
+									var pinItem = new JMenuItem(sidebarPinned ? "Unpin side panel" : "Pin side panel");
+									pinItem.addActionListener(ev -> toggleSidebarPinned());
+									menu.add(pinItem);
+								}
+
 								if (navBtn.getPopup() != null)
 								{
-									var menu = new JPopupMenu();
+									if (menu.getComponentCount() > 0)
+									{
+										menu.addSeparator();
+									}
 									navBtn.getPopup().forEach((name, cb) ->
 									{
 										var menuItem = new JMenuItem(name);
 										menuItem.addActionListener(ev -> cb.run());
 										menu.add(menuItem);
 									});
+								}
+
+								if (menu.getComponentCount() > 0)
+								{
 									menu.show(sidebar, e.getX(), e.getY());
 								}
 								return;
@@ -596,6 +618,14 @@ public class ClientUI
 					public void hotkeyPressed()
 					{
 						togglePluginPanel();
+					}
+				},
+				new HotkeyListener(config::sidebarPinKey)
+				{
+					@Override
+					public void hotkeyPressed()
+					{
+						toggleSidebarPinned();
 					}
 				});
 			KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(this::dispatchWindowKeyEvent);
@@ -1369,6 +1399,19 @@ public class ClientUI
 		giveClientFocus();
 	}
 
+	/**
+	 * The strip icon for navBtn, scaled to the configured button size.
+	 * <p>
+	 * The icon used to be pinned to 16px regardless of how tall its button was, so raising the
+	 * button size only padded a fixed-size image rather than drawing a bigger one. It is sized from
+	 * the button instead, leaving room for the insets applied in {@link #applySidebarStyle()}.
+	 */
+	private Icon sidebarTabIcon(NavigationButton navBtn)
+	{
+		int size = Math.max(12, Math.min(64, config.sidebarTabHeight()) - 8);
+		return new ImageIcon(ImageUtil.resizeImage(navBtn.getIcon(), size, size));
+	}
+
 	/** Orders the icon strip: dragged-into-place buttons first in the player's order, everything else after in stock order. */
 	private int compareSidebarEntries(NavigationButton a, NavigationButton b)
 	{
@@ -1442,7 +1485,7 @@ public class ClientUI
 			sidebar.removeAll();
 			for (NavigationButton nb : sidebarEntries)
 			{
-				sidebar.addTab(null, new ImageIcon(nb.getIcon()), nb.getPanel().getWrappedPanel(), nb.getTooltip());
+				sidebar.addTab(null, sidebarTabIcon(nb), nb.getPanel().getWrappedPanel(), nb.getTooltip());
 			}
 
 			sidebar.setSelectedIndex(reselect == null ? -1 : sidebarEntries.headSet(reselect).size());
@@ -1486,36 +1529,62 @@ public class ClientUI
 		}
 
 		int tabHeight = Math.max(16, Math.min(64, config.sidebarTabHeight()));
-		// Insets scale with the button so a larger one is padded proportionally rather than being a
-		// tall box around a small icon.
-		int inset = Math.max(2, tabHeight / 8);
+		// Fixed insets, so growth goes into the icon rather than into padding around it - see
+		// sidebarTabIcon(), which sizes the image to fill what these leave. Scaling the insets too
+		// would both starve the icon and overflow the button at the larger sizes.
 		sidebar.putClientProperty(FlatClientProperties.STYLE, String.format(
 			"tabInsets: %d,%d,%d,%d; variableSize: true; deselectable: true; tabHeight: %d",
-			inset, inset + 3, inset, inset + 3, tabHeight));
+			TAB_INSET, TAB_INSET + 3, TAB_INSET, TAB_INSET + 3, tabHeight));
 
 		int fontSize = Math.max(8, Math.min(24, config.sidebarFontSize()));
-		Font base = FontManager.getRunescapeFont();
+
+		// The RuneScape font is a pixel font drawn for 16px. Enlarging it past that interpolates
+		// glyphs that were never meant to be resampled, which reads as blurry and unevenly spaced
+		// rather than simply bigger. Past its design size, switch to the scalable UI font, which is
+		// a real outline typeface and stays crisp at any size.
+		Font base = fontSize > RUNESCAPE_FONT_DESIGN_SIZE
+			? FontManager.getDefaultFont()
+			: FontManager.getRunescapeFont();
+
 		sidebar.setFont(base.deriveFont((float) fontSize));
-		applyFontRecursively(sidebar, fontSize);
+		applyFontRecursively(sidebar, base, fontSize);
+
+		// Existing tabs keep whatever icon they were built with, so re-scale them in place too.
+		int index = 0;
+		for (NavigationButton navBtn : sidebarEntries)
+		{
+			if (index < sidebar.getTabCount())
+			{
+				sidebar.setIconAt(index, sidebarTabIcon(navBtn));
+			}
+			index++;
+		}
 
 		sidebar.revalidate();
 		sidebar.repaint();
 	}
 
-	/** Re-derives the size of every inherited font under c, leaving components that set their own alone. */
-	private static void applyFontRecursively(Component c, int size)
+	/**
+	 * Restyles every inherited font under c, leaving components that set their own alone.
+	 * <p>
+	 * Takes the family from base rather than deriving from whatever each component already has:
+	 * enlarging past the RuneScape font's design size means changing typeface, not just size, and
+	 * deriving would keep the pixel font that cannot be enlarged cleanly. Weight and slant are
+	 * carried over so bold labels stay bold.
+	 */
+	private static void applyFontRecursively(Component c, Font base, int size)
 	{
 		Font font = c.getFont();
-		if (font != null && font.getSize() != size)
+		if (font != null && (font.getSize() != size || !font.getFamily().equals(base.getFamily())))
 		{
-			c.setFont(font.deriveFont((float) size));
+			c.setFont(new Font(base.getFamily(), font.getStyle(), size));
 		}
 
 		if (c instanceof Container)
 		{
 			for (Component child : ((Container) c).getComponents())
 			{
-				applyFontRecursively(child, size);
+				applyFontRecursively(child, base, size);
 			}
 		}
 	}
@@ -1545,10 +1614,8 @@ public class ClientUI
 		if (!enabled)
 		{
 			// Leave the sidebar as the player last had it, not collapsed by a setting they turned off.
-			if (autoHideExpanded)
-			{
-				autoHideExpanded = false;
-			}
+			autoHideExpanded = false;
+			sidebarPinned = false;
 			return;
 		}
 
@@ -1586,7 +1653,8 @@ public class ClientUI
 			return;
 		}
 
-		if (!autoHideExpanded)
+		// Pinned stays open regardless of where the mouse is - that is the whole point of it.
+		if (!autoHideExpanded || sidebarPinned)
 		{
 			return;
 		}
@@ -1601,6 +1669,33 @@ public class ClientUI
 		if (now - autoHideLeftAt >= Math.max(0, config.sidebarAutoHideDelay()))
 		{
 			collapseSidebar();
+		}
+	}
+
+	/**
+	 * Pins the auto-hiding side panel open, or releases it back to following the mouse.
+	 * <p>
+	 * Pinning expands immediately and holds; unpinning hands control straight back to the hover
+	 * poll, which collapses on its own once the mouse is away. No-op unless auto-hide is actually
+	 * running, since there is nothing to pin open otherwise.
+	 */
+	private void toggleSidebarPinned()
+	{
+		if (autoHideTimer == null)
+		{
+			return;
+		}
+
+		sidebarPinned = !sidebarPinned;
+
+		if (sidebarPinned)
+		{
+			expandSidebar();
+		}
+		else
+		{
+			// Let the poll decide - collapsing here would snap it shut under a mouse still on it.
+			autoHideLeftAt = 0;
 		}
 	}
 
