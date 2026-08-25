@@ -87,7 +87,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "sidebarOverlayMode",
 		name = "Overlay side panel",
 		description = "Draw the side panel on top of the game instead of resizing the game or the window when it is opened.",
-		position = 11,
+		position = 12,
 		section = windowSettings
 	)
 	default boolean sidebarOverlayMode()
@@ -96,10 +96,63 @@ public interface RuneLiteConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "sidebarAutoHide",
+		name = "Auto-hide side panel",
+		description = "Collapse the side panel to just its icon strip, and expand the last used panel while the mouse is over it."
+			+ "<br>Requires Overlay side panel, since expanding would otherwise resize the game every time the mouse passed over.",
+		position = 13,
+		section = windowSettings
+	)
+	default boolean sidebarAutoHide()
+	{
+		return false;
+	}
+
+	@Range(min = 0, max = 2000)
+	@Units(Units.MILLISECONDS)
+	@ConfigItem(
+		keyName = "sidebarAutoHideDelay",
+		name = "Auto-hide delay",
+		description = "How long the side panel stays open after the mouse leaves it.",
+		position = 14,
+		section = windowSettings
+	)
+	default int sidebarAutoHideDelay()
+	{
+		return 400;
+	}
+
+	@Range(min = 16, max = 64)
+	@ConfigItem(
+		keyName = "sidebarTabHeight",
+		name = "Side panel button size",
+		description = "Height of each plugin's button in the side panel's icon strip.",
+		position = 15,
+		section = windowSettings
+	)
+	default int sidebarTabHeight()
+	{
+		return 26;
+	}
+
+	@Range(min = 8, max = 24)
+	@ConfigItem(
+		keyName = "sidebarFontSize",
+		name = "Side panel font size",
+		description = "Base font size for side panel contents. Plugins that set their own fonts explicitly are unaffected.",
+		position = 16,
+		section = windowSettings
+	)
+	default int sidebarFontSize()
+	{
+		return 12;
+	}
+
+	@ConfigItem(
 		keyName = "lockWindowSize",
 		name = "Lock window size",
 		description = "Determines if the window resizing is allowed or not.",
-		position = 12,
+		position = 17,
 		section = windowSettings
 	)
 	default boolean lockWindowSize()
@@ -111,7 +164,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "containInScreen2",
 		name = "Contain in screen",
 		description = "Makes the client move itself to stay within the screen when resizing.<br>Note: 'Always' only works on Windows and if custom chrome is enabled.",
-		position = 13,
+		position = 18,
 		section = windowSettings
 	)
 	default ContainableFrame.Mode containInScreen()
@@ -123,7 +176,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "rememberScreenBounds",
 		name = "Remember client position",
 		description = "Save the position and size of the client after exiting.",
-		position = 14,
+		position = 19,
 		section = windowSettings
 	)
 	default boolean rememberScreenBounds()
@@ -136,7 +189,7 @@ public interface RuneLiteConfig extends Config
 		name = "Enable custom window chrome",
 		description = "Use RuneLite's custom window title and borders.",
 		warning = "Please restart your client after changing this setting",
-		position = 15,
+		position = 20,
 		section = windowSettings
 	)
 	default boolean enableCustomChrome()
@@ -152,7 +205,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "uiWindowOpacity",
 		name = "Window opacity",
 		description = "Set the windows opacity.",
-		position = 16,
+		position = 21,
 		section = windowSettings
 	)
 	default int windowOpacity()
@@ -164,7 +217,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "gameAlwaysOnTop",
 		name = "Always on top",
 		description = "The game will always be on the top of the screen.",
-		position = 17,
+		position = 22,
 		section = windowSettings
 	)
 	default boolean gameAlwaysOnTop()
@@ -176,7 +229,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "warningOnExit",
 		name = "Exit warning",
 		description = "Shows a warning popup when trying to exit the client.",
-		position = 18,
+		position = 23,
 		section = windowSettings
 	)
 	default WarningOnExit warningOnExit()
@@ -188,7 +241,7 @@ public interface RuneLiteConfig extends Config
 		keyName = "usernameInTitle",
 		name = "Show display name in title",
 		description = "Toggles displaying of local player's display name in client title.",
-		position = 19,
+		position = 24,
 		section = windowSettings
 	)
 	default boolean usernameInTitle()
