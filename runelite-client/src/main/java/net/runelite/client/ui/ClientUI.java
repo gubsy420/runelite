@@ -37,6 +37,7 @@ import java.awt.Container;
 import java.awt.Cursor;
 import java.awt.Desktop;
 import java.awt.Dimension;
+import java.awt.Font;
 import java.awt.Frame;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -47,7 +48,9 @@ import java.awt.Image;
 import java.awt.Insets;
 import java.awt.KeyboardFocusManager;
 import java.awt.LayoutManager2;
+import java.awt.MouseInfo;
 import java.awt.Point;
+import java.awt.PointerInfo;
 import java.awt.Rectangle;
 import java.awt.SystemTray;
 import java.awt.Taskbar;
@@ -64,6 +67,7 @@ import java.awt.event.WindowFocusListener;
 import java.awt.image.BufferedImage;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
@@ -135,6 +139,7 @@ public class ClientUI
 	private static final String CONFIG_CLIENT_BOUNDS = "clientBounds";
 	private static final String CONFIG_CLIENT_MAXIMIZED = "clientMaximized";
 	private static final String CONFIG_CLIENT_SIDEBAR_CLOSED = "clientSidebarClosed";
+	private static final String CONFIG_CLIENT_SIDEBAR_ORDER = "clientSidebarOrder";
 	public static final BufferedImage ICON_128 = ImageUtil.loadImageResource(ClientUI.class, "runelite_128.png");
 	public static final BufferedImage ICON_16 = ImageUtil.loadImageResource(ClientUI.class, "runelite_16.png");
 
@@ -155,7 +160,16 @@ public class ClientUI
 	private BufferedImage sidebarCloseIcon;
 
 	private JTabbedPane sidebar;
-	private final TreeSet<NavigationButton> sidebarEntries = new TreeSet<>(NavigationButton.COMPARATOR);
+
+	/**
+	 * The player's own ordering of the icon strip, by navigation button tooltip, most significant
+	 * first. Buttons absent from it - a newly installed plugin, or one never dragged - fall in after
+	 * the ordered ones in {@link NavigationButton#COMPARATOR}'s usual priority order, so installing
+	 * a plugin never disturbs an arrangement already made.
+	 */
+	private final List<String> sidebarOrder = new ArrayList<>();
+	private final TreeSet<NavigationButton> sidebarEntries = new TreeSet<>(this::compareSidebarEntries);
+	private int dragSourceIndex = -1;
 	private final Deque<HistoryEntry> selectedTabHistory = new ArrayDeque<>();
 	private NavigationButton selectedTab;
 
@@ -167,6 +181,18 @@ public class ClientUI
 	private ClientPanel clientPanel;
 	private boolean sidebarOverlay;
 	private JButton sidebarNavBtn;
+
+	/**
+	 * Auto-hide state. The sidebar is a deselectable JTabbedPane, so "collapsed" is just no tab
+	 * selected - the tab strip stays, the panel body goes, and the existing layout already handles
+	 * both widths. autoHideExpanded tracks which of those we put it in, so a selection the player
+	 * made themselves is never mistaken for one of ours.
+	 */
+	private Timer autoHideTimer;
+	private boolean autoHideExpanded;
+	private boolean autoHideSuppressHistory;
+	private NavigationButton autoHideLastTab;
+	private long autoHideLeftAt;
 	private Dimension lastClientSize;
 	private Cursor defaultCursor;
 
@@ -407,6 +433,7 @@ public class ClientUI
 			clientPanel = new ClientPanel(this.client);
 			content.add(clientPanel);
 
+			loadSidebarOrder();
 			sidebar = new JTabbedPane(JTabbedPane.RIGHT);
 			sidebar.setBackground(ColorScheme.DARKER_GRAY_COLOR);
 			sidebar.setOpaque(true);
@@ -435,9 +462,19 @@ public class ClientUI
 
 				selectedTab = newSelectedTab;
 
+				// A tab the player picked themselves becomes the one auto-hide reopens on hover.
+				// Ours are flagged, so expanding and collapsing never rewrites that choice.
+				if (!autoHideSuppressHistory && newSelectedTab != null)
+				{
+					autoHideLastTab = newSelectedTab;
+				}
+
 				if (sidebar.isVisible())
 				{
-					pushHistory();
+					if (!autoHideSuppressHistory)
+					{
+						pushHistory();
+					}
 
 					if (oldSelectedTab != null)
 					{
@@ -454,8 +491,56 @@ public class ClientUI
 					}
 				}
 			});
+			// Drag a strip button up or down to reorder it. Press and release on the same button is
+			// left alone entirely, so an ordinary click still just opens the panel.
 			sidebar.addMouseListener(new java.awt.event.MouseAdapter()
 			{
+				@Override
+				public void mousePressed(MouseEvent e)
+				{
+					dragSourceIndex = e.getButton() == MouseEvent.BUTTON1
+						? sidebarTabIndexAt(e.getX(), e.getY())
+						: -1;
+				}
+
+				@Override
+				public void mouseReleased(MouseEvent e)
+				{
+					int from = dragSourceIndex;
+					dragSourceIndex = -1;
+					sidebar.setCursor(Cursor.getDefaultCursor());
+
+					if (from < 0)
+					{
+						return;
+					}
+
+					int to = sidebarTabIndexAt(e.getX(), e.getY());
+					if (to >= 0 && to != from)
+					{
+						moveSidebarEntry(from, to);
+					}
+				}
+			});
+			sidebar.addMouseMotionListener(new java.awt.event.MouseMotionAdapter()
+			{
+				@Override
+				public void mouseDragged(MouseEvent e)
+				{
+					if (dragSourceIndex >= 0)
+					{
+						sidebar.setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+					}
+				}
+			});
+			sidebar.addMouseListener(new java.awt.event.MouseAdapter()
+			{
+				@Override
+				public void mouseExited(MouseEvent e)
+				{
+					sidebar.setCursor(Cursor.getDefaultCursor());
+				}
+
 				@Override
 				public void mouseClicked(MouseEvent e)
 				{
@@ -1247,6 +1332,9 @@ public class ClientUI
 		}
 
 		applySidebarOverlay(config.sidebarOverlayMode());
+		applySidebarStyle();
+		// After applySidebarOverlay, since auto-hide only engages while the sidebar is overlaid.
+		updateSidebarAutoHide();
 
 		applyGameSize(false);
 	}
@@ -1279,6 +1367,293 @@ public class ClientUI
 		content.revalidate();
 		content.repaint();
 		giveClientFocus();
+	}
+
+	/** Orders the icon strip: dragged-into-place buttons first in the player's order, everything else after in stock order. */
+	private int compareSidebarEntries(NavigationButton a, NavigationButton b)
+	{
+		int ia = sidebarOrder.indexOf(a.getTooltip());
+		int ib = sidebarOrder.indexOf(b.getTooltip());
+
+		if (ia >= 0 && ib >= 0)
+		{
+			return Integer.compare(ia, ib);
+		}
+		if (ia >= 0)
+		{
+			return -1;
+		}
+		if (ib >= 0)
+		{
+			return 1;
+		}
+
+		return NavigationButton.COMPARATOR.compare(a, b);
+	}
+
+	/** Index of the strip button under a point in the sidebar's coordinate space, or -1. */
+	private int sidebarTabIndexAt(int x, int y)
+	{
+		for (int i = 0; i < sidebar.getTabCount(); i++)
+		{
+			Rectangle bounds = sidebar.getBoundsAt(i);
+			if (bounds != null && bounds.contains(x, y))
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * Moves a strip button, persists the new arrangement, and rebuilds the strip to match.
+	 * <p>
+	 * The set backing the strip is a {@link TreeSet} ordered by {@link #compareSidebarEntries}, and
+	 * a sorted set cannot be resequenced in place - its members have to come out and go back in once
+	 * the comparator would answer differently. Rebuilding the tabs from that re-sorted set is what
+	 * keeps the two in step, since every index the rest of this class uses is a position within it.
+	 */
+	private void moveSidebarEntry(int from, int to)
+	{
+		if (from == to || from < 0 || to < 0 || from >= sidebarEntries.size() || to >= sidebarEntries.size())
+		{
+			return;
+		}
+
+		List<NavigationButton> ordered = new ArrayList<>(sidebarEntries);
+		ordered.add(to, ordered.remove(from));
+
+		sidebarOrder.clear();
+		for (NavigationButton nb : ordered)
+		{
+			sidebarOrder.add(nb.getTooltip());
+		}
+		configManager.setConfiguration(CONFIG_GROUP, CONFIG_CLIENT_SIDEBAR_ORDER, String.join("\n", sidebarOrder));
+
+		NavigationButton reselect = selectedTab;
+
+		// Re-add so the set re-sorts under the order we just wrote.
+		sidebarEntries.clear();
+		sidebarEntries.addAll(ordered);
+
+		autoHideSuppressHistory = true;
+		try
+		{
+			sidebar.removeAll();
+			for (NavigationButton nb : sidebarEntries)
+			{
+				sidebar.addTab(null, new ImageIcon(nb.getIcon()), nb.getPanel().getWrappedPanel(), nb.getTooltip());
+			}
+
+			sidebar.setSelectedIndex(reselect == null ? -1 : sidebarEntries.headSet(reselect).size());
+		}
+		finally
+		{
+			autoHideSuppressHistory = false;
+		}
+
+		sidebar.revalidate();
+		sidebar.repaint();
+	}
+
+	/** Restores a saved icon strip order. Called before any navigation button is added, so the first sort already uses it. */
+	private void loadSidebarOrder()
+	{
+		String saved = configManager.getConfiguration(CONFIG_GROUP, CONFIG_CLIENT_SIDEBAR_ORDER);
+		if (Strings.isNullOrEmpty(saved))
+		{
+			return;
+		}
+
+		sidebarOrder.clear();
+		sidebarOrder.addAll(Arrays.asList(saved.split("\n")));
+	}
+
+	/**
+	 * Applies the configurable parts of the sidebar's own appearance - icon strip button size, and
+	 * the base font its panels inherit.
+	 * <p>
+	 * Both go through FlatLaf rather than being set on components directly: the strip is styled by
+	 * a client property string, and the font by the {@code defaultFont} the LAF hands to everything
+	 * that has not asked for a specific one. Plugins that call {@link FontManager} explicitly keep
+	 * their own font, by design - those are deliberate choices by their authors, not defaults.
+	 */
+	private void applySidebarStyle()
+	{
+		if (sidebar == null)
+		{
+			return;
+		}
+
+		int tabHeight = Math.max(16, Math.min(64, config.sidebarTabHeight()));
+		// Insets scale with the button so a larger one is padded proportionally rather than being a
+		// tall box around a small icon.
+		int inset = Math.max(2, tabHeight / 8);
+		sidebar.putClientProperty(FlatClientProperties.STYLE, String.format(
+			"tabInsets: %d,%d,%d,%d; variableSize: true; deselectable: true; tabHeight: %d",
+			inset, inset + 3, inset, inset + 3, tabHeight));
+
+		int fontSize = Math.max(8, Math.min(24, config.sidebarFontSize()));
+		Font base = FontManager.getRunescapeFont();
+		sidebar.setFont(base.deriveFont((float) fontSize));
+		applyFontRecursively(sidebar, fontSize);
+
+		sidebar.revalidate();
+		sidebar.repaint();
+	}
+
+	/** Re-derives the size of every inherited font under c, leaving components that set their own alone. */
+	private static void applyFontRecursively(Component c, int size)
+	{
+		Font font = c.getFont();
+		if (font != null && font.getSize() != size)
+		{
+			c.setFont(font.deriveFont((float) size));
+		}
+
+		if (c instanceof Container)
+		{
+			for (Component child : ((Container) c).getComponents())
+			{
+				applyFontRecursively(child, size);
+			}
+		}
+	}
+
+	/**
+	 * Starts or stops hover-driven auto-hide, per config.
+	 * <p>
+	 * Only meaningful with the sidebar overlaid: expanding a non-overlaid sidebar resizes the game,
+	 * so hovering past it would reflow the whole client repeatedly.
+	 * <p>
+	 * Driven by a polling timer against the pointer's screen position rather than mouseEntered /
+	 * mouseExited. The sidebar is a container full of plugin panels, each with their own listeners,
+	 * and its children swallow enter/exit events as the mouse crosses them - so the pane sees a
+	 * stream of exits while the mouse is still very much inside it. Asking where the pointer is
+	 * cannot be fooled that way.
+	 */
+	private void updateSidebarAutoHide()
+	{
+		boolean enabled = config.sidebarAutoHide() && config.sidebarOverlayMode();
+
+		if (autoHideTimer != null)
+		{
+			autoHideTimer.stop();
+			autoHideTimer = null;
+		}
+
+		if (!enabled)
+		{
+			// Leave the sidebar as the player last had it, not collapsed by a setting they turned off.
+			if (autoHideExpanded)
+			{
+				autoHideExpanded = false;
+			}
+			return;
+		}
+
+		collapseSidebar();
+
+		autoHideTimer = new Timer(100, e -> pollSidebarHover());
+		autoHideTimer.start();
+	}
+
+	/** One tick of the auto-hide poll: expand while the pointer is over the sidebar, collapse once it has been away for the configured delay. */
+	private void pollSidebarHover()
+	{
+		if (sidebar == null || !sidebar.isVisible() || !sidebar.isShowing())
+		{
+			return;
+		}
+
+		PointerInfo pointer = MouseInfo.getPointerInfo();
+		if (pointer == null)
+		{
+			return;
+		}
+
+		Point mouse = pointer.getLocation();
+		Rectangle bounds = new Rectangle(sidebar.getLocationOnScreen(), sidebar.getSize());
+		boolean over = bounds.contains(mouse);
+
+		if (over)
+		{
+			autoHideLeftAt = 0;
+			if (!autoHideExpanded)
+			{
+				expandSidebar();
+			}
+			return;
+		}
+
+		if (!autoHideExpanded)
+		{
+			return;
+		}
+
+		long now = System.currentTimeMillis();
+		if (autoHideLeftAt == 0)
+		{
+			autoHideLeftAt = now;
+			return;
+		}
+
+		if (now - autoHideLeftAt >= Math.max(0, config.sidebarAutoHideDelay()))
+		{
+			collapseSidebar();
+		}
+	}
+
+	private void expandSidebar()
+	{
+		NavigationButton target = autoHideLastTab != null ? autoHideLastTab : Iterables.getFirst(sidebarEntries, null);
+		if (target == null)
+		{
+			return;
+		}
+
+		int index = sidebarEntries.headSet(target).size();
+		if (index < 0 || index >= sidebar.getTabCount())
+		{
+			return;
+		}
+
+		autoHideExpanded = true;
+		autoHideSuppressHistory = true;
+		try
+		{
+			sidebar.setSelectedIndex(index);
+		}
+		finally
+		{
+			autoHideSuppressHistory = false;
+		}
+	}
+
+	private void collapseSidebar()
+	{
+		if (sidebar == null)
+		{
+			return;
+		}
+
+		// Remember what was open so the next hover brings the same panel back.
+		if (selectedTab != null)
+		{
+			autoHideLastTab = selectedTab;
+		}
+
+		autoHideExpanded = false;
+		autoHideLeftAt = 0;
+		autoHideSuppressHistory = true;
+		try
+		{
+			sidebar.setSelectedIndex(-1);
+		}
+		finally
+		{
+			autoHideSuppressHistory = false;
+		}
 	}
 
 	private void applyGameSize(boolean force)
