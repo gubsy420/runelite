@@ -36,7 +36,6 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
-import java.net.URLClassLoader;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -179,8 +178,10 @@ public class ExternalPluginManager
 		{
 			try
 			{
-				URLClassLoader cl = new URLClassLoader(new URL[]{jar.toURI().toURL()},
-					ExternalPluginManager.class.getClassLoader());
+				// Not a plain URLClassLoader: the EventBus needs a private lookup into the plugin's
+				// module to build a lambda call site per @Subscribe method, or every event it
+				// handles falls back to reflective dispatch. See SideloadedPluginClassLoader.
+				SideloadedPluginClassLoader cl = new SideloadedPluginClassLoader(new URL[]{jar.toURI().toURL()});
 
 				List<Class<?>> found = new ArrayList<>();
 				try (JarFile jarFile = new JarFile(jar))
