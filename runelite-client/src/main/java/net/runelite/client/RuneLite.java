@@ -176,6 +176,15 @@ public class RuneLite
 		parser.accepts("profile", "Configuration profile to use").withRequiredArg();
 		parser.accepts("noupdate", "Skips the launcher update");
 
+		// Accepted and ignored, so this jar can be handed straight to a third-party launcher that
+		// expects RuneLite's own launcher jar. Bolt, for one, always appends
+		// "-J-Duser.home=<its data dir>" on Linux; -J is a launcher option meaning "pass this to the
+		// client JVM", and there is no client JVM to pass it to when the client is what was started.
+		// The property it carries is already set on this JVM by the same command line, so honouring
+		// it would be redundant anyway - but refusing it aborts the launch before anything runs.
+		parser.accepts("J", "JVM argument; accepted for launcher compatibility and ignored")
+			.withRequiredArg();
+
 		final ArgumentAcceptingOptionSpec<File> sessionfile = parser.accepts("sessionfile", "Use a specified session file")
 			.withRequiredArg()
 			.withValuesConvertedBy(new ConfigFileConverter())
