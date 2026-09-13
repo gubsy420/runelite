@@ -49,7 +49,17 @@ public class RuneLiteLAF extends FlatDarkLaf
 	public static boolean setup()
 	{
 		// flatlaf always gets this wrong
-		System.setProperty(FlatSystemProperties.UI_SCALE_ENABLED, "false");
+		//
+		// ...when left to work the scale out for itself, which is what this turns off. A scale the
+		// user asked for explicitly is a different matter, and on Linux it is the only fractional
+		// one available: X11GraphicsDevice keeps the Java2D scale as an int and narrows
+		// sun.java2d.uiScale with a plain (int) cast, so 1.5 silently becomes 1 and nothing scales.
+		// Disabling the subsystem unconditionally here beat even a value passed on the command
+		// line, since System.setProperty at this point overrides -D.
+		if (System.getProperty(FlatSystemProperties.UI_SCALE) == null)
+		{
+			System.setProperty(FlatSystemProperties.UI_SCALE_ENABLED, "false");
+		}
 
 		return setup(new RuneLiteLAF());
 	}
